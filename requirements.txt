@@ -1,0 +1,13 @@
+
+langgraph
+langchain
+langchain-openai
+langgraph-checkpoint-sqlite
+fastapi
+uvicorn[standard]
+python-dotenv
+PyGithub
+black
+flake8
+pytest
+httpx
