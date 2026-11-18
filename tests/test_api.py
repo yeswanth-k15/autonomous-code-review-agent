@@ -1,4 +1,9 @@
 
+import hashlib
+import hmac
+import json
+import os
+
 from unittest.mock import patch, AsyncMock
 
 from fastapi.testclient import TestClient
@@ -6,6 +11,31 @@ from fastapi.testclient import TestClient
 from main import app
 
 client = TestClient(app)
+
+
+
+def create_github_signature(payload):
+    """Generate a signature for the exact HTTP request body."""
+
+    secret = os.getenv("WEBHOOK_SECRET")
+
+    if not secret:
+        raise RuntimeError("WEBHOOK_SECRET is missing from .env")
+
+    payload_body = json.dumps(
+        payload,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    digest = hmac.new(
+        secret.encode("utf-8"),
+        payload_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    return payload_body, f"sha256={digest}"
+
 
 
 def test_home_endpoint():
@@ -38,9 +68,15 @@ def test_github_webhook(mock_ainvoke):
         }
     }
 
+    payload_body, signature = create_github_signature(payload)
+    
     response = client.post(
-        "/api/webhooks/github",
-        json=payload
+    	"/api/webhooks/github",
+    	content=payload_body,
+    	headers={
+        	"Content-Type": "application/json",
+        	"X-Hub-Signature-256": signature,
+    	},
     )
 
     assert response.status_code == 200
@@ -50,12 +86,61 @@ def test_github_webhook(mock_ainvoke):
 
 
 def test_github_webhook_without_pull_request():
+    payload = {"action": "opened"}
+
+    payload_body, signature = create_github_signature(payload)
+
     response = client.post(
-        "/api/webhooks/github",
-        json={"action": "opened"}
-    )
+    	"/api/webhooks/github",
+    	content=payload_body,
+    	headers={
+        	"Content-Type": "application/json",
+        	"X-Hub-Signature-256": signature,
+    	},
+     )
 
     assert response.status_code == 400
+
+
+def test_github_webhook_without_signature():
+    payload = {
+        "repository": {
+            "full_name": "user/project"
+        },
+        "pull_request": {
+            "number": 1,
+            "html_url": "https://github.com/user/project/pull/1"
+        }
+    }
+
+    response = client.post(
+        "/api/webhooks/github",
+        json=payload,
+    )
+
+    assert response.status_code == 401
+
+
+def test_github_webhook_with_invalid_signature():
+    payload = {
+        "repository": {
+            "full_name": "user/project"
+        },
+        "pull_request": {
+            "number": 1,
+            "html_url": "https://github.com/user/project/pull/1"
+        }
+    }
+
+    response = client.post(
+        "/api/webhooks/github",
+        json=payload,
+        headers={
+            "X-Hub-Signature-256": "sha256=invalidsignature"
+        },
+    )
+
+    assert response.status_code == 401
 
 
 @patch("app.api.routes.review_graph.ainvoke", new_callable=AsyncMock)
@@ -65,7 +150,9 @@ def test_approve_review(mock_get_state, mock_ainvoke):
         "Snapshot",
         (),
         {
-            "values": {"pr_url": "https://github.com/user/project/pull/1"},
+            "values": {
+                "pr_url": "https://github.com/user/project/pull/1"
+            },
             "next": ("approval_node",)
         }
     )()

@@ -1,4 +1,10 @@
+import os
+from dotenv import load_dotenv
+from fastapi import Request
 
+from app.services.webhook_security import verify_github_signature
+
+load_dotenv()
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from langgraph.types import Command
@@ -15,11 +21,30 @@ class ApprovalRequest(BaseModel):
 
 
 @router.post("/api/webhooks/github")
-async def github_webhook(payload: dict):
+async def github_webhook(request: Request):
     """
-    Receive GitHub pull request webhook events
-    and start the code review workflow.
+    Receive and verify GitHub pull request webhook events.
     """
+
+    signature = request.headers.get("X-Hub-Signature-256")
+    payload_body = await request.body()
+
+    if not verify_github_signature(payload_body, signature):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing GitHub webhook signature."
+        )
+
+    try:
+        import json
+
+        payload = json.loads(payload_body)
+
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid JSON payload."
+        )
 
     pull_request = payload.get("pull_request")
 
@@ -37,9 +62,19 @@ async def github_webhook(payload: dict):
             detail="Pull request URL is missing."
         )
 
-    thread_id = str(
-        payload.get("repository", {}).get("full_name", "")
-    ) + "-" + str(pull_request.get("number", ""))
+    repository_name = payload.get(
+        "repository", {}
+    ).get("full_name")
+
+    pr_number = pull_request.get("number")
+
+    if not repository_name or pr_number is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Repository name or pull request number is missing."
+        )
+
+    thread_id = f"{repository_name}-{pr_number}"
 
     config = {
         "configurable": {
@@ -62,11 +97,13 @@ async def github_webhook(payload: dict):
             "interrupted": bool(result.get("__interrupt__")),
         }
 
-    except Exception as error:
+    except Exception:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to start review: {str(error)}"
+            detail="Failed to start review workflow."
         )
+
+
 
 
 @router.post("/api/reviews/{thread_id}/approve")
