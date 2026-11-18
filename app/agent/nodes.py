@@ -1,4 +1,4 @@
-
+from app.services.github_commit_service import commit_refactored_files
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -111,4 +111,46 @@ def propose_refactor_node(state: dict) -> dict:
         "history": history + [
             {"action": "propose_refactor", "status": "success"}
         ],
+    }
+
+def apply_changes_node(state: dict) -> dict:
+    """
+    Commit refactored files only after explicit reviewer approval.
+    """
+
+    is_approved = state.get("is_approved")
+
+    if is_approved is not True:
+        history = state.get("history", [])
+
+        return {
+            "history": history + [
+                {
+                    "action": "apply_changes",
+                    "status": "skipped",
+                }
+            ]
+        }
+
+    pr_url = state["pr_url"]
+    refactored_code = state.get("refactored_code", {})
+
+    if not refactored_code:
+        raise ValueError("No refactored code available to commit.")
+
+    commit_sha = commit_refactored_files(
+        pr_url=pr_url,
+        refactored_code=refactored_code,
+    )
+
+    history = state.get("history", [])
+
+    return {
+        "history": history + [
+            {
+                "action": "apply_changes",
+                "status": "success",
+                "commit_sha": commit_sha,
+            }
+        ]
     }
