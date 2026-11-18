@@ -53,7 +53,9 @@ def test_health_endpoint():
 
 
 @patch("app.api.routes.review_graph.ainvoke", new_callable=AsyncMock)
-def test_github_webhook(mock_ainvoke):
+def test_github_webhook(mock_ainvoke, tmp_path, monkeypatch):
+    database_path = tmp_path / "test_checkpoints.sqlite"
+    monkeypatch.setenv("CHECKPOINT_DB_PATH", str(database_path))
     mock_ainvoke.return_value = {
         "__interrupt__": ["waiting for review"]
     }
@@ -76,6 +78,7 @@ def test_github_webhook(mock_ainvoke):
     	headers={
         	"Content-Type": "application/json",
         	"X-Hub-Signature-256": signature,
+		"X-GitHub-Delivery": "test-delivery-001",
     	},
     )
 
@@ -195,3 +198,120 @@ def test_approve_unknown_thread():
         )
 
     assert response.status_code == 404
+
+@patch("app.api.routes.review_graph.ainvoke", new_callable=AsyncMock)
+def test_duplicate_webhook_delivery_is_ignored(
+    mock_ainvoke, tmp_path, monkeypatch
+):
+    database_path = tmp_path / "duplicate_test.sqlite"
+    monkeypatch.setenv("CHECKPOINT_DB_PATH", str(database_path))
+
+    mock_ainvoke.return_value = {
+        "__interrupt__": ["waiting for review"]
+    }
+
+    payload = {
+        "repository": {"full_name": "user/project"},
+        "pull_request": {
+            "number": 10,
+            "html_url": "https://github.com/user/project/pull/10",
+        },
+    }
+
+    payload_body, signature = create_github_signature(payload)
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Hub-Signature-256": signature,
+        "X-GitHub-Delivery": "duplicate-test-001",
+    }
+
+    first_response = client.post(
+        "/api/webhooks/github",
+        content=payload_body,
+        headers=headers,
+    )
+
+    second_response = client.post(
+        "/api/webhooks/github",
+        content=payload_body,
+        headers=headers,
+    )
+
+    assert first_response.status_code == 200
+    assert first_response.json()["status"] == "waiting_for_review"
+
+    assert second_response.status_code == 200
+    assert second_response.json()["status"] == "duplicate"
+
+    mock_ainvoke.assert_called_once()
+
+
+@patch(
+    "app.api.routes.review_graph.ainvoke",
+    new_callable=AsyncMock,
+    side_effect=[RuntimeError("Temporary workflow failure"), {}],
+)
+def test_failed_webhook_can_be_retried(
+    mock_ainvoke, tmp_path, monkeypatch
+):
+    database_path = tmp_path / "retry_test.sqlite"
+    monkeypatch.setenv("CHECKPOINT_DB_PATH", str(database_path))
+
+    payload = {
+        "repository": {"full_name": "user/project"},
+        "pull_request": {
+            "number": 11,
+            "html_url": "https://github.com/user/project/pull/11",
+        },
+    }
+
+    payload_body, signature = create_github_signature(payload)
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Hub-Signature-256": signature,
+        "X-GitHub-Delivery": "retry-test-001",
+    }
+
+    first_response = client.post(
+        "/api/webhooks/github",
+        content=payload_body,
+        headers=headers,
+    )
+
+    second_response = client.post(
+        "/api/webhooks/github",
+        content=payload_body,
+        headers=headers,
+    )
+
+    assert first_response.status_code == 500
+    assert second_response.status_code == 200
+    assert second_response.json()["status"] == "waiting_for_review"
+
+    assert mock_ainvoke.call_count == 2
+
+
+def test_webhook_without_delivery_id_is_rejected():
+    payload = {
+        "repository": {"full_name": "user/project"},
+        "pull_request": {
+            "number": 12,
+            "html_url": "https://github.com/user/project/pull/12",
+        },
+    }
+
+    payload_body, signature = create_github_signature(payload)
+
+    response = client.post(
+        "/api/webhooks/github",
+        content=payload_body,
+        headers={
+            "Content-Type": "application/json",
+            "X-Hub-Signature-256": signature,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Missing GitHub webhook delivery ID."
