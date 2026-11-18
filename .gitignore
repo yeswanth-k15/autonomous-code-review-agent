@@ -9,3 +9,4 @@ checkpoints.sqlite
 *.log
 .idea/
 .vscode/
+checkpoints.sqlite*
