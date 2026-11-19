@@ -7,6 +7,8 @@ import os
 from unittest.mock import patch, AsyncMock
 
 from fastapi.testclient import TestClient
+from langgraph.checkpoint.memory import MemorySaver
+from app.agent.graph import build_graph
 
 from main import app
 
@@ -384,3 +386,314 @@ def test_approve_review_without_server_configuration():
     assert response.json()["detail"] == (
         "Reviewer authentication is not configured."
     )
+def test_webhook_starts_real_graph_and_pauses_for_review(monkeypatch):
+    # Use a test webhook secret.
+    monkeypatch.setenv("WEBHOOK_SECRET", "integration-test-secret")
+
+    # Mock external operations. No GitHub API or OpenAI calls.
+    def mock_fetch(state):
+        return {
+            "code_contents": {"main.py": "print('hello')"},
+            "head_sha": "test-head-sha",
+        }
+
+    def mock_lint(state):
+        return {
+            "lint_errors": {"main.py": "Formatting issue"}
+        }
+
+    def mock_propose(state):
+        return {
+            "refactored_code": {"main.py": "print('Hello!')"}
+        }
+
+    def mock_apply(state):
+        raise AssertionError(
+            "Changes must not be applied before reviewer approval."
+        )
+
+    # Replace the graph nodes before building the test graph.
+    monkeypatch.setattr(
+        "app.agent.graph.fetch_pr_node", mock_fetch
+    )
+    monkeypatch.setattr(
+        "app.agent.graph.lint_code_node", mock_lint
+    )
+    monkeypatch.setattr(
+        "app.agent.graph.propose_refactor_node", mock_propose
+    )
+    monkeypatch.setattr(
+        "app.agent.graph.apply_changes_node", mock_apply
+    )
+
+    # Build a real LangGraph with an in-memory checkpointer.
+    test_graph = build_graph(checkpointer=MemorySaver())
+
+    # Make the FastAPI route use our test graph.
+    monkeypatch.setattr(
+        "app.api.routes.review_graph", test_graph
+    )
+
+    # Avoid writing to the webhook delivery database.
+    monkeypatch.setattr(
+        "app.api.routes.claim_webhook_delivery",
+        lambda delivery_id: True,
+    )
+
+    payload = {
+        "repository": {
+            "full_name": "integration-user/integration-project"
+        },
+        "pull_request": {
+            "number": 987,
+            "html_url": (
+                "https://github.com/integration-user/"
+                "integration-project/pull/987"
+            ),
+        },
+    }
+
+    payload_body, signature = create_github_signature(payload)
+
+    response = client.post(
+        "/api/webhooks/github",
+        content=payload_body,
+        headers={
+            "Content-Type": "application/json",
+            "X-Hub-Signature-256": signature,
+            "X-GitHub-Delivery": "integration-test-delivery-987",
+        },
+    )
+
+    # Verify the API successfully started the workflow.
+    assert response.status_code == 200
+    assert response.json()["interrupted"] is True
+
+    thread_id = "integration-user/integration-project-987"
+
+    # Verify the actual graph is paused for human review.
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+        }
+    }
+
+    snapshot = test_graph.get_state(config)
+
+    assert snapshot.next == ("approval_node",)
+    assert snapshot.values["code_contents"] == {
+        "main.py": "print('hello')"
+    }
+    assert snapshot.values["refactored_code"] == {
+        "main.py": "print('Hello!')"
+    }
+    assert snapshot.values["is_approved"] is None
+def test_rejection_feedback_reaches_real_graph(monkeypatch):
+    monkeypatch.setenv("WEBHOOK_SECRET", "integration-test-secret")
+    monkeypatch.setenv("REVIEWER_API_TOKEN", TEST_REVIEWER_TOKEN)
+
+    proposal_count = {"value": 0}
+
+    def mock_fetch(state):
+        return {
+            "code_contents": {"main.py": "print('hello')"},
+            "head_sha": "test-head-sha",
+        }
+
+    def mock_lint(state):
+        return {
+            "lint_errors": {"main.py": "Formatting issue"}
+        }
+
+    def mock_propose(state):
+        proposal_count["value"] += 1
+
+        return {
+            "refactored_code": {
+                "main.py": (
+                    "print('First proposal')"
+                    if proposal_count["value"] == 1
+                    else "print('Improved proposal')"
+                )
+            }
+        }
+
+    def mock_apply(state):
+        raise AssertionError(
+            "Rejected changes must never be applied."
+        )
+
+    monkeypatch.setattr("app.agent.graph.fetch_pr_node", mock_fetch)
+    monkeypatch.setattr("app.agent.graph.lint_code_node", mock_lint)
+    monkeypatch.setattr("app.agent.graph.propose_refactor_node", mock_propose)
+    monkeypatch.setattr("app.agent.graph.apply_changes_node", mock_apply)
+
+    test_graph = build_graph(checkpointer=MemorySaver())
+
+    monkeypatch.setattr("app.api.routes.review_graph", test_graph)
+    monkeypatch.setattr(
+        "app.api.routes.claim_webhook_delivery",
+        lambda delivery_id: True,
+    )
+
+    payload = {
+        "repository": {
+            "full_name": "integration-user/rejection-project"
+        },
+        "pull_request": {
+            "number": 100,
+            "html_url": (
+                "https://github.com/integration-user/"
+                "rejection-project/pull/100"
+            ),
+        },
+    }
+
+    payload_body, signature = create_github_signature(payload)
+
+    webhook_response = client.post(
+        "/api/webhooks/github",
+        content=payload_body,
+        headers={
+            "Content-Type": "application/json",
+            "X-Hub-Signature-256": signature,
+            "X-GitHub-Delivery": "rejection-test-delivery-100",
+        },
+    )
+
+    assert webhook_response.status_code == 200
+    assert proposal_count["value"] == 1
+
+    thread_id = "integration-user/rejection-project-100"
+
+    approval_response = client.post(
+        f"/api/reviews/{thread_id}/approve",
+        json={
+            "is_approved": False,
+            "reviewer_feedback": "Improve variable naming.",
+        },
+        headers={
+            "Authorization": f"Bearer {TEST_REVIEWER_TOKEN}"
+        },
+    )
+
+    assert approval_response.status_code == 200
+    assert approval_response.json()["is_approved"] is False
+    assert approval_response.json()["interrupted"] is True
+
+    snapshot = test_graph.get_state(
+        {"configurable": {"thread_id": thread_id}}
+    )
+
+    assert proposal_count["value"] == 2
+    assert snapshot.next == ("approval_node",)
+    assert snapshot.values["reviewer_feedback"] == (
+        "Improve variable naming."
+    )
+    assert snapshot.values["refactored_code"]["main.py"] == (
+        "print('Improved proposal')"
+    )
+    assert snapshot.values["is_approved"] is False
+
+def test_approval_endpoint_applies_changes_after_approval(monkeypatch):
+    monkeypatch.setenv("WEBHOOK_SECRET", "integration-test-secret")
+    monkeypatch.setenv("REVIEWER_API_TOKEN", TEST_REVIEWER_TOKEN)
+
+    commit_calls = []
+
+    def mock_fetch(state):
+        return {
+            "code_contents": {"main.py": "print('hello')"},
+            "head_sha": "test-head-sha",
+        }
+
+    def mock_lint(state):
+        return {
+            "lint_errors": {"main.py": "Formatting issue"}
+        }
+
+    def mock_propose(state):
+        return {
+            "refactored_code": {
+                "main.py": "print('Hello!')"
+            }
+        }
+
+    def mock_commit(pr_url, refactored_code, expected_head_sha):
+        commit_calls.append({
+            "pr_url": pr_url,
+            "refactored_code": refactored_code,
+            "expected_head_sha": expected_head_sha,
+        })
+        return "test-commit-sha"
+
+    monkeypatch.setattr("app.agent.graph.fetch_pr_node", mock_fetch)
+    monkeypatch.setattr("app.agent.graph.lint_code_node", mock_lint)
+    monkeypatch.setattr("app.agent.graph.propose_refactor_node", mock_propose)
+    monkeypatch.setattr(
+        "app.agent.nodes.commit_refactored_files",
+        mock_commit,
+    )
+
+    test_graph = build_graph(checkpointer=MemorySaver())
+
+    monkeypatch.setattr("app.api.routes.review_graph", test_graph)
+    monkeypatch.setattr(
+        "app.api.routes.claim_webhook_delivery",
+        lambda delivery_id: True,
+    )
+
+    payload = {
+        "repository": {"full_name": "integration-user/approval-project"},
+        "pull_request": {
+            "number": 200,
+            "html_url": (
+                "https://github.com/integration-user/"
+                "approval-project/pull/200"
+            ),
+        },
+    }
+
+    payload_body, signature = create_github_signature(payload)
+
+    webhook_response = client.post(
+        "/api/webhooks/github",
+        content=payload_body,
+        headers={
+            "Content-Type": "application/json",
+            "X-Hub-Signature-256": signature,
+            "X-GitHub-Delivery": "approval-test-delivery-200",
+        },
+    )
+
+    assert webhook_response.status_code == 200
+
+    thread_id = "integration-user/approval-project-200"
+
+    approval_response = client.post(
+        f"/api/reviews/{thread_id}/approve",
+        json={
+            "is_approved": True,
+            "reviewer_feedback": "",
+        },
+        headers={
+            "Authorization": f"Bearer {TEST_REVIEWER_TOKEN}"
+        },
+    )
+
+    assert approval_response.status_code == 200
+
+    config = {"configurable": {"thread_id": thread_id}}
+
+    # The endpoint must complete the approved workflow.
+    assert commit_calls == [{
+        "pr_url": payload["pull_request"]["html_url"],
+        "refactored_code": {"main.py": "print('Hello!')"},
+        "expected_head_sha": "test-head-sha",
+    }]
+
+    final_state = test_graph.get_state(config).values
+
+    assert final_state["is_approved"] is True
+    assert final_state["history"][-1]["action"] == "apply_changes"
+    assert final_state["history"][-1]["commit_sha"] == "test-commit-sha"

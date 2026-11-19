@@ -147,7 +147,7 @@ async def github_webhook(request: Request):
         )
 
 
-@router.post("/api/reviews/{thread_id}/approve")
+@router.post("/api/reviews/{thread_id:path}/approve")
 async def approve_review(
     thread_id: str,
     request: ApprovalRequest,
@@ -207,6 +207,15 @@ async def approve_review(
             ),
             config=config,
         )
+        # If approved, resume once more after the pre-commit checkpoint.
+        if request.is_approved:
+            snapshot = review_graph.get_state(config)
+
+            if snapshot.next == ("apply_changes_node",):
+                result = await review_graph.ainvoke(
+                    None,
+                    config=config,
+                )
 
         return {
             "message": "Review decision submitted.",
@@ -222,52 +231,4 @@ async def approve_review(
         raise HTTPException(
             status_code=500,
             detail="Failed to submit review.",
-        )
-    """Submit reviewer feedback and resume the workflow."""
-
-    config = {
-        "configurable": {
-            "thread_id": thread_id,
-        }
-    }
-
-    try:
-        snapshot = review_graph.get_state(config)
-
-        if not snapshot.values:
-            raise HTTPException(
-                status_code=404,
-                detail="Review thread not found.",
-            )
-
-        if not snapshot.next:
-            raise HTTPException(
-                status_code=409,
-                detail="Review workflow is not waiting for input.",
-            )
-
-        result = await review_graph.ainvoke(
-            Command(
-                resume={
-                    "is_approved": request.is_approved,
-                    "reviewer_feedback": request.reviewer_feedback,
-                }
-            ),
-            config=config,
-        )
-
-        return {
-            "message": "Review decision submitted.",
-            "thread_id": thread_id,
-            "is_approved": request.is_approved,
-            "interrupted": bool(result.get("__interrupt__")),
-        }
-
-    except HTTPException:
-        raise
-
-    except Exception as error:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to submit review: {str(error)}",
         )
