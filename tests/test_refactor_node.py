@@ -81,3 +81,68 @@ def test_propose_refactor_node_without_code():
             propose_refactor_node(state)
 
     mock_chat.assert_not_called()
+
+def test_propose_refactor_node_removes_markdown_code_fences():
+    state = {
+        "code_contents": {"main.py": "print('hello')"},
+        "lint_errors": {},
+        "reviewer_feedback": "",
+        "history": [],
+    }
+
+    mock_llm = MagicMock()
+    mock_llm.invoke.return_value = SimpleNamespace(
+        content="```python\nprint('Hello!')\n```"
+    )
+
+    with patch(
+        "app.agent.nodes.ChatOpenAI",
+        return_value=mock_llm,
+    ):
+        result = propose_refactor_node(state)
+
+    assert result["refactored_code"]["main.py"] == "print('Hello!')"
+
+
+def test_propose_refactor_node_rejects_empty_response():
+    state = {
+        "code_contents": {"main.py": "print('hello')"},
+        "lint_errors": {},
+        "reviewer_feedback": "",
+        "history": [],
+    }
+
+    mock_llm = MagicMock()
+    mock_llm.invoke.return_value = SimpleNamespace(content="   ")
+
+    with patch(
+        "app.agent.nodes.ChatOpenAI",
+        return_value=mock_llm,
+    ):
+        with pytest.raises(
+            ValueError,
+            match="The AI returned empty code for main.py",
+        ):
+            propose_refactor_node(state)
+
+
+def test_propose_refactor_node_propagates_llm_failure():
+    state = {
+        "code_contents": {"main.py": "print('hello')"},
+        "lint_errors": {},
+        "reviewer_feedback": "",
+        "history": [],
+    }
+
+    mock_llm = MagicMock()
+    mock_llm.invoke.side_effect = RuntimeError("LLM service unavailable")
+
+    with patch(
+        "app.agent.nodes.ChatOpenAI",
+        return_value=mock_llm,
+    ):
+        with pytest.raises(
+            RuntimeError,
+            match="LLM service unavailable",
+        ):
+            propose_refactor_node(state)
