@@ -1,9 +1,10 @@
 
 import json
 import os
+import hmac
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Header
 from langgraph.types import Command
 from pydantic import BaseModel
 
@@ -18,6 +19,15 @@ from app.services.webhook_security import verify_github_signature
 load_dotenv()
 
 router = APIRouter()
+def verify_reviewer_token(token: str | None) -> bool:
+    """Verify the reviewer API token securely."""
+
+    expected_token = os.getenv("REVIEWER_API_TOKEN")
+
+    if not expected_token or not token:
+        return False
+
+    return hmac.compare_digest(token, expected_token)
 
 
 class ApprovalRequest(BaseModel):
@@ -141,7 +151,78 @@ async def github_webhook(request: Request):
 async def approve_review(
     thread_id: str,
     request: ApprovalRequest,
+    authorization: str | None = Header(default=None),
 ):
+    """Submit reviewer feedback and resume the workflow."""
+
+    expected_token = os.getenv("REVIEWER_API_TOKEN")
+
+    if not expected_token:
+        raise HTTPException(
+            status_code=503,
+            detail="Reviewer authentication is not configured.",
+        )
+
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid reviewer authorization.",
+    )
+
+    provided_token = authorization.removeprefix("Bearer ").strip()
+
+    if not verify_reviewer_token(provided_token):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid reviewer token.",
+        )
+
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+        }
+    }
+
+    try:
+        snapshot = review_graph.get_state(config)
+
+        if not snapshot.values:
+            raise HTTPException(
+                status_code=404,
+                detail="Review thread not found.",
+            )
+
+        if not snapshot.next:
+            raise HTTPException(
+                status_code=409,
+                detail="Review workflow is not waiting for input.",
+            )
+
+        result = await review_graph.ainvoke(
+            Command(
+                resume={
+                    "is_approved": request.is_approved,
+                    "reviewer_feedback": request.reviewer_feedback,
+                }
+            ),
+            config=config,
+        )
+
+        return {
+            "message": "Review decision submitted.",
+            "thread_id": thread_id,
+            "is_approved": request.is_approved,
+            "interrupted": bool(result.get("__interrupt__")),
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to submit review.",
+        )
     """Submit reviewer feedback and resume the workflow."""
 
     config = {

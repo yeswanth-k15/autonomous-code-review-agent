@@ -176,6 +176,21 @@ http://127.0.0.1:8000/docs
 | `POST` | `/api/webhooks/github` | Receives GitHub webhook events |
 | `POST` | `/api/reviews/{thread_id}/approve` | Submits reviewer approval or rejection |
 
+### Reviewer Authentication
+
+The review approval endpoint is protected using Bearer Token authentication.
+
+Every approval or rejection request must include the following HTTP header:
+
+```http
+Authorization: Bearer YOUR_REVIEWER_API_TOKEN
+
+Configure REVIEWER_API_TOKEN in your .env file before starting the application.
+
+The application rejects requests with missing or invalid tokens. If the reviewer token is not configured on the server, the endpoint returns 503 Service Unavailable.
+
+Important: Never expose your reviewer token or commit your .env file to GitHub.
+
 The webhook endpoint validates GitHub webhook signatures and handles delivery IDs to avoid processing duplicate deliveries.
 
 ## Running Tests

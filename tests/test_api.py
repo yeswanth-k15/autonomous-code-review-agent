@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from main import app
 
 client = TestClient(app)
-
+TEST_REVIEWER_TOKEN = "test-reviewer-token-123"
 
 
 def create_github_signature(payload):
@@ -161,14 +161,21 @@ def test_approve_review(mock_get_state, mock_ainvoke):
     )()
 
     mock_ainvoke.return_value = {}
+    with patch.dict(
+        os.environ,
+        {"REVIEWER_API_TOKEN": TEST_REVIEWER_TOKEN},
+    ):
 
-    response = client.post(
-        "/api/reviews/user-project-1/approve",
-        json={
-            "is_approved": True,
-            "reviewer_feedback": ""
-        }
-    )
+        response = client.post(
+            "/api/reviews/user-project-1/approve",
+            json={
+                "is_approved": True,
+                "reviewer_feedback": ""
+            },
+            headers={
+                "Authorization": f"Bearer {TEST_REVIEWER_TOKEN}"
+            },
+        )
 
     assert response.status_code == 200
     assert response.json()["is_approved"] is True
@@ -189,13 +196,20 @@ def test_approve_unknown_thread():
             }
         )()
 
-        response = client.post(
-            "/api/reviews/unknown-thread/approve",
-            json={
-                "is_approved": True,
-                "reviewer_feedback": ""
-            }
-        )
+        with patch.dict(
+            os.environ,
+            {"REVIEWER_API_TOKEN": TEST_REVIEWER_TOKEN},
+        ):
+            response = client.post(
+                "/api/reviews/unknown-thread/approve",
+                json={
+                    "is_approved": True,
+                    "reviewer_feedback": ""
+                },
+                headers={
+                    "Authorization": f"Bearer {TEST_REVIEWER_TOKEN}"
+                },
+            )
 
     assert response.status_code == 404
 
@@ -315,3 +329,58 @@ def test_webhook_without_delivery_id_is_rejected():
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Missing GitHub webhook delivery ID."
+def test_approve_review_without_token():
+    with patch.dict(
+        os.environ,
+        {"REVIEWER_API_TOKEN": TEST_REVIEWER_TOKEN},
+    ):
+        response = client.post(
+            "/api/reviews/test-thread/approve",
+            json={
+                "is_approved": True,
+                "reviewer_feedback": "",
+            },
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == (
+        "Missing or invalid reviewer authorization."
+    )
+
+
+def test_approve_review_with_invalid_token():
+    with patch.dict(
+        os.environ,
+        {"REVIEWER_API_TOKEN": TEST_REVIEWER_TOKEN},
+    ):
+        response = client.post(
+            "/api/reviews/test-thread/approve",
+            json={
+                "is_approved": True,
+                "reviewer_feedback": "",
+            },
+            headers={
+                "Authorization": "Bearer wrong-token",
+            },
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid reviewer token."
+
+
+def test_approve_review_without_server_configuration():
+    with patch.dict(os.environ):
+        os.environ.pop("REVIEWER_API_TOKEN", None)
+
+        response = client.post(
+            "/api/reviews/test-thread/approve",
+            json={
+                "is_approved": True,
+                "reviewer_feedback": "",
+            },
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "Reviewer authentication is not configured."
+    )
