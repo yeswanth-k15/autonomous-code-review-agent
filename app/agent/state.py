@@ -13,6 +13,8 @@ class ReviewState(TypedDict):
     # GitHub Pull Request URL
     pr_url: str
 
+    head_sha: str
+
     # Original source code retrieved from the PR
     code_contents: dict[str, str]
 
@@ -39,6 +41,7 @@ def create_initial_state(pr_url: str) -> ReviewState:
 
     return {
         "pr_url": pr_url,
+        "head_sha": "",
         "code_contents": {},
         "lint_errors": {},
         "refactored_code": {},

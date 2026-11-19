@@ -1,3 +1,4 @@
+from app.agent.state import ReviewState
 from app.services.github_commit_service import commit_refactored_files
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -7,26 +8,34 @@ from app.agent.prompts import (
     REFACTOR_SYSTEM_PROMPT,
     build_refactor_prompt,
 )
-from app.services.github_service import fetch_pull_request_files
+from app.services.github_service import fetch_pull_request_data
 from app.tools.linter_tool import run_linter_tool
 
 load_dotenv()
 
 
-def fetch_pr_node(state: dict) -> dict:
-    pr_url = state["pr_url"]
+def fetch_pr_node(state: ReviewState) -> dict:
+    """Fetch pull request files and record the source commit SHA."""
 
-    code_contents = fetch_pull_request_files(pr_url)
+    code_contents, head_sha = fetch_pull_request_data(
+        state["pr_url"]
+    )
 
-    history = state.get("history", [])
+    if not code_contents:
+        raise ValueError(
+            "No eligible Python files found in the pull request."
+        )
 
     return {
         "code_contents": code_contents,
-        "history": history + [
-            {"action": "fetch_pr", "status": "success"}
+        "head_sha": head_sha,
+        "history": state.get("history", []) + [
+            {
+                "action": "fetch_pr",
+                "status": "success",
+            }
         ],
     }
-
 
 def lint_code_node(state: dict) -> dict:
     code_contents = state.get("code_contents", {})
@@ -139,8 +148,9 @@ def apply_changes_node(state: dict) -> dict:
         raise ValueError("No refactored code available to commit.")
 
     commit_sha = commit_refactored_files(
-        pr_url=pr_url,
+        pr_url=state["pr_url"],
         refactored_code=refactored_code,
+        expected_head_sha=state["head_sha"],
     )
 
     history = state.get("history", [])

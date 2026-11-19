@@ -13,13 +13,19 @@ def test_fetch_pull_request_files(mock_github):
 
     # Mock repository
     mock_repo = MagicMock()
-    mock_client.get_repo.return_value = mock_repo
+    mock_source_repo = MagicMock()
+
+    mock_client.get_repo.side_effect = [
+        mock_repo,
+        mock_source_repo,
+    ]
 
     # Mock Pull Request
     mock_pr = MagicMock()
     mock_repo.get_pull.return_value = mock_pr
 
     mock_pr.head.sha = "test-commit-sha"
+    mock_pr.head.repo.full_name = "user/project"
 
     # Mock modified file
     mock_file = MagicMock()
@@ -32,7 +38,7 @@ def test_fetch_pull_request_files(mock_github):
     mock_content = MagicMock()
     mock_content.decoded_content = b"print('Hello World')"
 
-    mock_repo.get_contents.return_value = mock_content
+    mock_source_repo.get_contents.return_value = mock_content
 
     with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}):
 
@@ -44,15 +50,20 @@ def test_fetch_pull_request_files(mock_github):
         "main.py": "print('Hello World')"
     }
 
-    mock_client.get_repo.assert_called_once_with(
-        "user/project"
+    assert mock_client.get_repo.call_count == 2
+
+    mock_client.get_repo.assert_any_call("user/project")
+
+    mock_source_repo.get_contents.assert_called_once_with(
+        "main.py",
+        ref="test-commit-sha",
     )
 
     mock_repo.get_pull.assert_called_once_with(1)
 
-    mock_repo.get_contents.assert_called_once_with(
+    mock_source_repo.get_contents.assert_called_once_with(
         "main.py",
-        ref="test-commit-sha"
+        ref="test-commit-sha",
     )
 
     mock_client.close.assert_called_once()

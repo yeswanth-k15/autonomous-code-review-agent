@@ -10,6 +10,8 @@ def test_create_initial_state():
 
     assert state["pr_url"] == "https://github.com/user/project/pull/1"
 
+    assert state["head_sha"] == ""
+
     assert state["code_contents"] == {}
 
     assert state["lint_errors"] == {}

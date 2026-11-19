@@ -9,6 +9,7 @@ from app.agent.nodes import apply_changes_node
 def create_state(is_approved):
     return {
         "pr_url": "https://github.com/user/project/pull/1",
+        "head_sha": "parent-commit-sha",
         "code_contents": {
             "main.py": "print('Hello World')"
         },
@@ -34,7 +35,8 @@ def test_apply_changes_when_approved():
 
     mock_commit.assert_called_once_with(
         pr_url=state["pr_url"],
-        refactored_code=state["refactored_code"]
+        refactored_code=state["refactored_code"],
+        expected_head_sha=state["head_sha"],
     )
 
     assert result["history"][-1]["action"] == "apply_changes"

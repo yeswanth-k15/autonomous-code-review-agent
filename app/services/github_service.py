@@ -8,25 +8,17 @@ from github import Github
 load_dotenv()
 
 
-def fetch_pull_request_files(pr_url: str) -> dict[str, str]:
-    """
-    Fetch modified Python files from a GitHub Pull Request.
-
-    Returns:
-        Dictionary containing filename and source code.
-    """
+def fetch_pull_request_data(
+    pr_url: str,
+) -> tuple[dict[str, str], str]:
+    """Fetch Python files and the source commit SHA from a pull request."""
 
     github_token = os.getenv("GITHUB_TOKEN")
 
     if not github_token:
         raise ValueError("GITHUB_TOKEN is missing from .env")
 
-    # Validate and extract GitHub PR information
-    pattern = (
-        r"^https://github\.com/"
-        r"([^/]+)/([^/]+)/pull/(\d+)/?$"
-    )
-
+    pattern = r"^https://github\.com/([^/]+)/([^/]+)/pull/(\d+)/?$"
     match = re.match(pattern, pr_url.strip())
 
     if not match:
@@ -37,39 +29,57 @@ def fetch_pull_request_files(pr_url: str) -> dict[str, str]:
     github_client = Github(github_token)
 
     try:
-        repository = github_client.get_repo(
+        base_repository = github_client.get_repo(
             f"{owner}/{repo_name}"
         )
 
-        pull_request = repository.get_pull(int(pr_number))
+        pull_request = base_repository.get_pull(int(pr_number))
+
+        head_repository = pull_request.head.repo
+
+        if head_repository is None:
+            raise ValueError(
+                "Pull request source repository is unavailable."
+            )
+
+        source_repository = github_client.get_repo(
+            head_repository.full_name
+        )
+
+        head_sha = pull_request.head.sha
 
         code_contents = {}
 
-        # Retrieve modified files
         for file in pull_request.get_files():
-
-            # Only analyze Python files
             if not file.filename.endswith(".py"):
                 continue
 
-            # Skip deleted files
             if file.status == "removed":
                 continue
 
-            # Retrieve contents from the PR's latest commit
-            content = repository.get_contents(
+            if not file.contents_url:
+                continue
+
+            content = source_repository.get_contents(
                 file.filename,
-                ref=pull_request.head.sha
+                ref=head_sha,
             )
 
             if isinstance(content, list):
                 continue
 
             code = content.decoded_content.decode("utf-8")
-
             code_contents[file.filename] = code
 
-        return code_contents
+        return code_contents, head_sha
 
     finally:
         github_client.close()
+
+
+def fetch_pull_request_files(pr_url: str) -> dict[str, str]:
+    """Fetch Python files from a pull request."""
+
+    code_contents, _ = fetch_pull_request_data(pr_url)
+
+    return code_contents
