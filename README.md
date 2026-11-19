@@ -84,6 +84,7 @@ autonomous-code-review-agent/
 ├── .gitignore
 ├── main.py
 ├── requirements.txt
+├── openapi.json
 └── README.md
 ```
 
@@ -135,6 +136,7 @@ Configure the following variables:
 GITHUB_TOKEN=your_github_token
 OPENAI_API_KEY=your_openai_api_key
 WEBHOOK_SECRET=your_github_webhook_secret
+REVIEWER_API_TOKEN=your_secure_reviewer_token
 APP_ENV=development
 CHECKPOINT_DB_PATH=checkpoints.sqlite
 ```
@@ -176,6 +178,16 @@ http://127.0.0.1:8000/docs
 | `POST` | `/api/webhooks/github` | Receives GitHub webhook events |
 | `POST` | `/api/reviews/{thread_id}/approve` | Submits reviewer approval or rejection |
 
+### OpenAPI Specification
+
+The generated OpenAPI specification is available in `openapi.json`.
+
+FastAPI interactive documentation:
+
+- Swagger UI: `http://127.0.0.1:8000/docs`
+- ReDoc: `http://127.0.0.1:8000/redoc`
+
+
 ### Reviewer Authentication
 
 The review approval endpoint is protected using Bearer Token authentication.
@@ -184,14 +196,16 @@ Every approval or rejection request must include the following HTTP header:
 
 ```http
 Authorization: Bearer YOUR_REVIEWER_API_TOKEN
+```
 
-Configure REVIEWER_API_TOKEN in your .env file before starting the application.
+Configure `REVIEWER_API_TOKEN` in your `.env` file before starting the application.
 
 The application rejects requests with missing or invalid tokens. If the reviewer token is not configured on the server, the endpoint returns 503 Service Unavailable.
 
 Important: Never expose your reviewer token or commit your .env file to GitHub.
 
 The webhook endpoint validates GitHub webhook signatures and handles delivery IDs to avoid processing duplicate deliveries.
+
 
 ## Running Tests
 
@@ -217,7 +231,7 @@ The test suite covers workflow state, GitHub integration, linting, refactoring, 
 
 ## Future Improvements
 
-- Add authenticated reviewer access and role-based authorization.
+- Implement role-based reviewer authorization and stronger production authentication.
 - Add support for additional programming languages.
 - Improve AI-generated code review explanations.
 - Add review reports and code quality metrics.
